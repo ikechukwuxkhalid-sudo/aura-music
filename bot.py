@@ -34,7 +34,7 @@ from utils.db import (
 from utils.emoji import pe, set_enabled, is_enabled, set_emoji, save_map
 from utils.helpers import (
     is_owner, is_authorized, is_group_admin, bot_can_restrict, bot_can_delete,
-    parse_time, extract_user, has_link
+    bot_can_promote, parse_time, extract_user, resolve_user, has_link
 )
 from handlers.filters_mod import filter_cmd, stop_filter_cmd, filters_list_cmd, check_filters
 from handlers.forcejoin import forcejoin_cmd, check_force_join, fj_callback
@@ -139,22 +139,29 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await bot_can_restrict(update, context):
-        await update.message.reply_text(f"{pe('cross','❌')} I need restrict permission.")
+        await update.message.reply_text("❌ I need Restrict Members permission. Promote me properly.")
         return
-    uid, mention = extract_user(update, context)
-    if not uid and update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        mention = update.message.reply_to_message.from_user.mention_html()
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
-        await update.message.reply_text("Reply to a user or give user id.")
+        await update.message.reply_text("Reply to a user, or use /ban @username or /ban USER_ID")
         return
-    reason = " ".join(context.args[1:]) if context.args and len(context.args) > 1 else "No reason"
+    # don't ban admins / owner / self
+    if await is_group_admin(update, context, uid) or await is_owner(uid):
+        await update.message.reply_text("❌ Can't ban an admin/owner.")
+        return
+    reason = "No reason"
+    if context.args:
+        # if first arg is id/username skip it for reason
+        start = 1 if (context.args[0].isdigit() or context.args[0].startswith("@")) else 0
+        if update.message.reply_to_message:
+            start = 0
+        reason = " ".join(context.args[start:]) or "No reason"
     try:
         await context.bot.ban_chat_member(update.effective_chat.id, uid)
         await log_action(context.bot_data["db"], update.effective_chat.id, "ban", update.effective_user.id, uid, reason)
-        await update.message.reply_text(f"{pe('ban','⛔️')} Banned {mention}\nReason: {reason}", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"⛔️ Banned {mention}\nReason: {reason}", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await update.message.reply_text(f"{pe('cross','❌')} {e}")
+        await update.message.reply_text(f"❌ Ban failed: {e}")
 
 @group_only
 @admin_only
@@ -168,12 +175,9 @@ async def tban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not t:
         await update.message.reply_text("Invalid time. Use 1h 30m 2d etc.")
         return
-    uid, mention = extract_user(update, context)
-    if not uid and update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        mention = update.message.reply_to_message.from_user.mention_html()
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
-        await update.message.reply_text("Reply to a user.")
+        await update.message.reply_text("Reply to a user or pass @username / USER_ID")
         return
     until = datetime.utcnow() + t
     try:
@@ -185,13 +189,7 @@ async def tban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 @admin_only
 async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid, mention = extract_user(update, context)
-    if not uid and context.args:
-        try:
-            uid = int(context.args[0])
-            mention = f"<code>{uid}</code>"
-        except ValueError:
-            pass
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
         await update.message.reply_text("Give user id or reply.")
         return
@@ -205,39 +203,45 @@ async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await bot_can_restrict(update, context):
+        await update.message.reply_text("❌ I need Restrict Members permission.")
         return
-    uid, mention = extract_user(update, context)
-    if not uid and update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        mention = update.message.reply_to_message.from_user.mention_html()
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
-        await update.message.reply_text("Reply to a user.")
+        await update.message.reply_text("Reply to a user or /kick @user or /kick USER_ID")
+        return
+    if await is_group_admin(update, context, uid) or await is_owner(uid):
+        await update.message.reply_text("❌ Can't kick an admin/owner.")
         return
     try:
         await context.bot.ban_chat_member(update.effective_chat.id, uid)
         await context.bot.unban_chat_member(update.effective_chat.id, uid)
-        await update.message.reply_text(f"{pe('kick','👢')} Kicked {mention}", parse_mode=ParseMode.HTML)
+        await log_action(context.bot_data["db"], update.effective_chat.id, "kick", update.effective_user.id, uid, "")
+        await update.message.reply_text(f"👢 Kicked {mention}", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
+        await update.message.reply_text(f"❌ Kick failed: {e}")
+
 
 @group_only
 @admin_only
 async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await bot_can_restrict(update, context):
+        await update.message.reply_text("❌ I need Restrict Members permission.")
         return
-    uid, mention = extract_user(update, context)
-    if not uid and update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        mention = update.message.reply_to_message.from_user.mention_html()
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
-        await update.message.reply_text("Reply to a user.")
+        await update.message.reply_text("Reply to a user or /mute @user")
+        return
+    if await is_group_admin(update, context, uid) or await is_owner(uid):
+        await update.message.reply_text("❌ Can't mute an admin/owner.")
         return
     perms = ChatPermissions(can_send_messages=False)
     try:
         await context.bot.restrict_chat_member(update.effective_chat.id, uid, permissions=perms)
-        await update.message.reply_text(f"{pe('mute','🔇')} Muted {mention}", parse_mode=ParseMode.HTML)
+        await log_action(context.bot_data["db"], update.effective_chat.id, "mute", update.effective_user.id, uid, "")
+        await update.message.reply_text(f"🔇 Muted {mention}", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
+        await update.message.reply_text(f"❌ Mute failed: {e}")
+
 
 @group_only
 @admin_only
@@ -251,11 +255,9 @@ async def tmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not t:
         await update.message.reply_text("Invalid time.")
         return
-    uid, mention = extract_user(update, context)
-    if not uid and update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        mention = update.message.reply_to_message.from_user.mention_html()
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
+        await update.message.reply_text("Reply to a user or pass @username / USER_ID")
         return
     perms = ChatPermissions(can_send_messages=False)
     until = datetime.utcnow() + t
@@ -268,37 +270,160 @@ async def tmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 @admin_only
 async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid, mention = extract_user(update, context)
-    if not uid and update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        mention = update.message.reply_to_message.from_user.mention_html()
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
+        await update.message.reply_text("Reply to a user or /unmute @user")
         return
     perms = ChatPermissions(
-        can_send_messages=True, can_send_media_messages=True,
-        can_send_other_messages=True, can_add_web_page_previews=True
+        can_send_messages=True, can_send_audios=True, can_send_documents=True,
+        can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+        can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
+        can_add_web_page_previews=True
     )
     try:
         await context.bot.restrict_chat_member(update.effective_chat.id, uid, permissions=perms)
-        await update.message.reply_text(f"{pe('check','✅')} Unmuted {mention}", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"✅ Unmuted {mention}", parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(f"❌ {e}")
+
+
+
+@group_only
+@admin_only
+async def promote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await bot_can_promote(update, context):
+        await update.message.reply_text("❌ I need Promote Members permission.")
+        return
+    uid, mention, _ = await resolve_user(update, context)
+    if not uid:
+        await update.message.reply_text("Reply to a user or /promote @user")
+        return
+    try:
+        await context.bot.promote_chat_member(
+            update.effective_chat.id, uid,
+            can_delete_messages=True,
+            can_restrict_members=True,
+            can_invite_users=True,
+            can_pin_messages=True,
+            can_manage_chat=True,
+        )
+        await update.message.reply_text(f"⬆️ Promoted {mention}", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Promote failed: {e}")
+
+@group_only
+@admin_only
+async def demote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await bot_can_promote(update, context):
+        await update.message.reply_text("❌ I need Promote Members permission.")
+        return
+    uid, mention, _ = await resolve_user(update, context)
+    if not uid:
+        await update.message.reply_text("Reply to a user or /demote @user")
+        return
+    try:
+        await context.bot.promote_chat_member(
+            update.effective_chat.id, uid,
+            is_anonymous=False,
+            can_manage_chat=False,
+            can_delete_messages=False,
+            can_manage_video_chats=False,
+            can_restrict_members=False,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+        await update.message.reply_text(f"⬇️ Demoted {mention}", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Demote failed: {e}")
+
+@group_only
+async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cool admin panel menu"""
+    kb = [
+        [
+            InlineKeyboardButton("⛔️ Ban", callback_data="help_ban"),
+            InlineKeyboardButton("👢 Kick", callback_data="help_kick"),
+            InlineKeyboardButton("🔇 Mute", callback_data="help_mute"),
+        ],
+        [
+            InlineKeyboardButton("⚠️ Warn", callback_data="help_warn"),
+            InlineKeyboardButton("⬆️ Promote", callback_data="help_promote"),
+            InlineKeyboardButton("⬇️ Demote", callback_data="help_demote"),
+        ],
+        [
+            InlineKeyboardButton("🔒 Locks", callback_data="help_locks"),
+            InlineKeyboardButton("🔗 Anti-link", callback_data="help_antilink"),
+            InlineKeyboardButton("👀 Anti-delete", callback_data="help_antidelete"),
+        ],
+        [
+            InlineKeyboardButton("👋 Welcome", callback_data="help_welcome"),
+            InlineKeyboardButton("📝 Notes", callback_data="help_notes"),
+            InlineKeyboardButton("⚡ Filters", callback_data="help_filters"),
+        ],
+        [
+            InlineKeyboardButton("📢 Force Join", callback_data="help_forcejoin"),
+            InlineKeyboardButton("👑 Federation", callback_data="help_fed"),
+            InlineKeyboardButton("ℹ️ Help", callback_data="help_full"),
+        ],
+    ]
+    await update.message.reply_text(
+        f"🛡 <b>Dr Aura Control Panel</b>\n\n"
+        f"Group: <b>{update.effective_chat.title}</b>\n"
+        f"Choose a category:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data or ""
+    guides = {
+        "help_ban": "⛔️ <b>Ban</b>\n/ban (reply) [reason]\n/ban @user [reason]\n/ban USER_ID [reason]\n/tban 1h (reply)\n/unban USER_ID",
+        "help_kick": "👢 <b>Kick</b>\n/kick (reply)\n/kick @user\n/kick USER_ID",
+        "help_mute": "🔇 <b>Mute</b>\n/mute (reply)\n/tmute 1h (reply)\n/unmute (reply)",
+        "help_warn": "⚠️ <b>Warn</b>\n/warn (reply) [reason]\n/unwarn (reply)\n/warns (reply)",
+        "help_promote": "⬆️ <b>Promote</b>\n/promote (reply)\n/promote @user\n\n⬇️ <b>Demote</b>\n/demote (reply)",
+        "help_demote": "⬇️ <b>Demote</b>\n/demote (reply)\n/demote @user",
+        "help_locks": "🔒 <b>Locks</b>\n/lock url|media|photo|video|sticker|gif|forward|command|text|all\n/unlock TYPE\n/locks",
+        "help_antilink": "🔗 <b>Anti-link</b>\n/antilink off — disable\n/antilink del — delete links\n/antilink kick|ban|mute — delete + action",
+        "help_antidelete": "👀 <b>Anti-delete</b>\n/antidelete on — watch messages\n/antidelete off\nWhen someone deletes a message, bot reports who deleted + content (from cache).",
+        "help_welcome": "👋 <b>Welcome</b>\n/setwelcome Hello {mention} in {group}\n/setgoodbye Bye {name}\n/setrules rules text\n/rules",
+        "help_notes": "📝 <b>Notes</b>\n/save name (reply to media/text)\n/get name  or  #name\n/notes  /clear name",
+        "help_filters": "⚡ <b>Filters</b>\n/filter keyword reply text\n/stop keyword\n/filters",
+        "help_forcejoin": "📢 <b>Force Join</b>\n/forcejoin add @channel\n/forcejoin del @channel\n/forcejoin clear",
+        "help_fed": "👑 <b>Federation</b>\n/newfed Name\n/joinfed FED_ID\n/fedban (reply)\n/fedunban USER_ID\n/fedinfo",
+        "help_full": "Use /help for full command list.",
+    }
+    text = guides.get(data, "Unknown")
+    kb = [[InlineKeyboardButton("🔙 Back", callback_data="help_back")]]
+    if data == "help_back":
+        # re-show panel - edit
+        kb = [
+            [InlineKeyboardButton("⛔️ Ban", callback_data="help_ban"), InlineKeyboardButton("👢 Kick", callback_data="help_kick"), InlineKeyboardButton("🔇 Mute", callback_data="help_mute")],
+            [InlineKeyboardButton("⚠️ Warn", callback_data="help_warn"), InlineKeyboardButton("⬆️ Promote", callback_data="help_promote"), InlineKeyboardButton("⬇️ Demote", callback_data="help_demote")],
+            [InlineKeyboardButton("🔒 Locks", callback_data="help_locks"), InlineKeyboardButton("🔗 Anti-link", callback_data="help_antilink"), InlineKeyboardButton("👀 Anti-delete", callback_data="help_antidelete")],
+            [InlineKeyboardButton("👋 Welcome", callback_data="help_welcome"), InlineKeyboardButton("📝 Notes", callback_data="help_notes"), InlineKeyboardButton("⚡ Filters", callback_data="help_filters")],
+            [InlineKeyboardButton("📢 Force Join", callback_data="help_forcejoin"), InlineKeyboardButton("👑 Federation", callback_data="help_fed")],
+        ]
+        text = f"🛡 <b>Dr Aura Control Panel</b>\n\nChoose a category:"
+    await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+
 
 # ==================== WARNINGS ====================
 @group_only
 @admin_only
 async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid, mention = extract_user(update, context)
-    if not uid and update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        mention = update.message.reply_to_message.from_user.mention_html()
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
-        await update.message.reply_text("Reply to a user.")
+        await update.message.reply_text("Reply to a user or /warn @user")
         return
-    reason = " ".join(context.args) if context.args else "No reason"
-    # strip id if first arg is id
-    if context.args and context.args[0].isdigit():
-        reason = " ".join(context.args[1:]) or "No reason"
+    reason = "No reason"
+    if context.args:
+        start = 1 if (context.args[0].isdigit() or context.args[0].startswith("@")) and not update.message.reply_to_message else 0
+        reason = " ".join(context.args[start:]) or "No reason"
     db = context.bot_data["db"]
     count = await add_warn(db, update.effective_chat.id, uid, reason, update.effective_user.id)
     row = await get_group(db, update.effective_chat.id)
@@ -318,11 +443,9 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 @admin_only
 async def unwarn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid, mention = extract_user(update, context)
-    if not uid and update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        mention = update.message.reply_to_message.from_user.mention_html()
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
+        await update.message.reply_text("Reply to a user or pass @username / USER_ID")
         return
     db = context.bot_data["db"]
     await reset_warns(db, update.effective_chat.id, uid)
@@ -330,10 +453,7 @@ async def unwarn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @group_only
 async def warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid, mention = extract_user(update, context)
-    if not uid and update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        mention = update.message.reply_to_message.from_user.mention_html()
+    uid, mention, _ = await resolve_user(update, context)
     if not uid:
         uid = update.effective_user.id
         mention = update.effective_user.mention_html()
@@ -778,21 +898,37 @@ async def message_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     # --- Anti-link ---
-    antilink = row["antilink"] or "off"
-    if antilink != "off" and msg.text and has_link(msg.text):
+    antilink = (row["antilink"] or "off") if row else "off"
+    text_check = msg.text or msg.caption or ""
+    # also detect link previews / entities
+    has_url_entity = False
+    if msg.entities:
+        for ent in msg.entities:
+            if ent.type in ("url", "text_link"):
+                has_url_entity = True
+                break
+    if msg.caption_entities:
+        for ent in msg.caption_entities:
+            if ent.type in ("url", "text_link"):
+                has_url_entity = True
+                break
+    if antilink != "off" and (has_link(text_check) or has_url_entity):
         try:
             await msg.delete()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"antilink delete fail: {e}")
+        action_note = ""
         if antilink == "kick":
             try:
                 await context.bot.ban_chat_member(chat_id, user.id)
                 await context.bot.unban_chat_member(chat_id, user.id)
+                action_note = " + kicked"
             except Exception:
                 pass
         elif antilink == "ban":
             try:
                 await context.bot.ban_chat_member(chat_id, user.id)
+                action_note = " + banned"
             except Exception:
                 pass
         elif antilink == "mute":
@@ -800,8 +936,19 @@ async def message_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.restrict_chat_member(
                     chat_id, user.id, permissions=ChatPermissions(can_send_messages=False)
                 )
+                action_note = " + muted"
             except Exception:
                 pass
+        try:
+            warn = await context.bot.send_message(
+                chat_id,
+                f"🔗 Link removed from {user.mention_html()}{action_note}",
+                parse_mode=ParseMode.HTML
+            )
+            # auto delete warning after 5s
+            
+        except Exception:
+            pass
         return
 
     # --- Locks ---
@@ -872,7 +1019,7 @@ async def post_init(app: Application):
     for oid in OWNER_IDS:
         await db.execute("INSERT OR IGNORE INTO owners (user_id) VALUES (?)", (oid,))
     await db.commit()
-    pe_state = await get_global(db, "premium_emoji", "1")
+    pe_state = await get_global(db, "premium_emoji", "0")
     set_enabled(pe_state == "1")
     log.info(f"{BOT_NAME} v{VERSION} ready | premium emoji={is_enabled()}")
 
@@ -903,6 +1050,11 @@ def main():
     app.add_handler(CommandHandler("mute", mute_cmd))
     app.add_handler(CommandHandler("tmute", tmute_cmd))
     app.add_handler(CommandHandler("unmute", unmute_cmd))
+    app.add_handler(CommandHandler("promote", promote_cmd))
+    app.add_handler(CommandHandler("demote", demote_cmd))
+    app.add_handler(CommandHandler("panel", panel_cmd))
+    app.add_handler(CommandHandler("menu", panel_cmd))
+    app.add_handler(CallbackQueryHandler(panel_callback, pattern=r"^help_"))
     app.add_handler(CommandHandler("warn", warn_cmd))
     app.add_handler(CommandHandler("unwarn", unwarn_cmd))
     app.add_handler(CommandHandler("resetwarns", unwarn_cmd))
